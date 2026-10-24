@@ -129,7 +129,7 @@ function connect() {
   const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
 
   ws.onopen = () => {
-    ws.send('CAP REQ :twitch.tv/tags');
+    ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
     ws.send('PASS SCHMOOPIIE');
     ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 80000));
     ws.send('JOIN #' + CHANNEL);
@@ -140,6 +140,8 @@ function connect() {
       if (!line) continue;
       if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); continue; }
       if (line.includes(' JOIN #' + CHANNEL)) setStatus('Connected to #' + CHANNEL + ' — waiting for chat');
+      const room = line.match(/room-id=(\d+)[^ ]* :tmi\.twitch\.tv ROOMSTATE/);
+      if (room) loadChannelEmotes(room[1]);
       const msg = parsePrivmsg(line);
       if (msg) handleChat(msg);
     }
@@ -154,13 +156,57 @@ function parsePrivmsg(line) {
   if (!match) return null;
   const tags = {};
   (match[1] || '').split(';').forEach(pair => { const [k, v] = pair.split('='); tags[k] = v; });
-  return { user: match[2].toLowerCase(), name: tags['display-name'] || match[2], text: match[3] };
+  return { user: match[2].toLowerCase(), name: tags['display-name'] || match[2], text: match[3], emotes: tags.emotes };
 }
 
-function handleChat({ user, name, text }) {
+// ---------- emotes: never read them out ----------
+// Twitch emotes come marked inside each message. 7TV / BTTV / FFZ emotes are just words,
+// so we download their names once and skip any word that matches.
+const extraEmotes = new Set();
+let loadedRoom = null;
+
+function addEmoteNames(url, pick) {
+  return fetch(url).then(r => r.ok ? r.json() : null)
+    .then(data => { if (data) pick(data).forEach(name => name && extraEmotes.add(name)); })
+    .catch(() => {});
+}
+
+function loadChannelEmotes(roomId) {
+  if (loadedRoom === roomId) return;
+  loadedRoom = roomId;
+  const codes = list => (list || []).map(e => e.code);
+  const names = set => ((set && set.emotes) || []).map(e => e.name);
+  Promise.all([
+    addEmoteNames('https://api.betterttv.net/3/cached/emotes/global', codes),
+    addEmoteNames('https://api.betterttv.net/3/cached/users/twitch/' + roomId, d => [...codes(d.channelEmotes), ...codes(d.sharedEmotes)]),
+    addEmoteNames('https://api.betterttv.net/3/cached/frankerfacez/emotes/global', codes),
+    addEmoteNames('https://api.betterttv.net/3/cached/frankerfacez/users/twitch/' + roomId, codes),
+    addEmoteNames('https://7tv.io/v3/emote-sets/global', names),
+    addEmoteNames('https://7tv.io/v3/users/twitch/' + roomId, d => names(d.emote_set)),
+  ]).then(() => console.log('[tts] loaded', extraEmotes.size, '7TV/BTTV/FFZ emotes'));
+}
+
+// Twitch's tag looks like "25:0-4,12-16/1902:6-10" (emote id : character positions).
+function removeEmotes(text, emotesTag) {
+  if (emotesTag) {
+    const chars = Array.from(text);
+    emotesTag.split('/').forEach(emote => {
+      (emote.split(':')[1] || '').split(',').forEach(range => {
+        const [from, to] = range.split('-').map(Number);
+        for (let i = from; i <= to; i++) chars[i] = '';
+      });
+    });
+    text = chars.join('');
+  }
+  return text.split(/\s+/).filter(word => word && !extraEmotes.has(word)).join(' ');
+}
+
+function handleChat({ user, name, text, emotes }) {
   if (IGNORED.has(user)) return;
   if (text.startsWith('!')) return;                       // bot commands
   if (text.startsWith('\u0001ACTION ')) text = text.slice(8, -1); // "/me" messages
+  text = removeEmotes(text, emotes);
+  if (!text) return;                                      // message was only emotes
   if (DEBUG) setStatus(name + ': ' + text);
   // Display names with only letters read nicely; odd ones (numbers, underscores) get tidied.
   const spokenName = name.replace(/[_\d]+/g, ' ').trim() || name;
