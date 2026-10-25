@@ -1,0 +1,234 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Google's voice refuses requests that say which site they came from -->
+<meta name="referrer" content="no-referrer">
+<title>Chat TTS</title>
+<style>
+  html, body { margin: 0; background: transparent; font-family: sans-serif; }
+  #status {
+    display: none; position: fixed; left: 8px; bottom: 8px; max-width: 90vw;
+    padding: 6px 10px; border-radius: 6px; background: rgba(0,0,0,.7); color: #fff; font-size: 14px;
+  }
+  body.debug #status { display: block; }
+</style>
+</head>
+<body>
+<div id="status">Starting…</div>
+<script>
+/*
+  Twitch chat -> Text to speech overlay.
+  Settings go in the link, e.g.  index.html?channel=olly_vr&volume=0.8
+    channel   Twitch channel name                    (default olly_vr)
+    key       VoiceRSS key -> British male voice. Without it, a female Google voice is used.
+    voice     VoiceRSS voice name                     (default Harry)
+    lang      Google voice: en-AU (Australian), en-GB (British), en (American), he, ...  (default en-AU)
+    speed     talking speed, same pitch: 1 = normal  (default 1.08)
+    volume    0 to 1                                  (default 1)
+    names     1 = say "user says: ...", 0 = message only (default 1)
+    maxlen    longest message to read, in characters  (default 200)
+    skip      extra usernames to ignore, comma separated
+    debug     1 = show a small status box on screen
+    test      1 = say a test sentence on load
+*/
+const params = new URLSearchParams(location.search);
+const CHANNEL = (params.get('channel') || 'olly_vr').toLowerCase().replace(/^#/, '');
+const KEY = (params.get('key') || '').trim();
+const VOICE = params.get('voice') || 'Harry';
+const LANG = params.get('lang') || 'en-AU';
+const SPEED = Math.min(2, Math.max(0.5, parseFloat(params.get('speed') || '1.08') || 1));
+const VOLUME = Math.min(1, Math.max(0, parseFloat(params.get('volume') ?? '1') || 0));
+const SAY_NAMES = params.get('names') !== '0';
+const MAX_LEN = parseInt(params.get('maxlen') || '200', 10);
+const DEBUG = params.get('debug') === '1';
+const IGNORED = new Set(['nightbot', 'streamelements', 'streamlabs', 'moobot', 'fossabot', 'wizebot', 'soundalerts',
+  ...(params.get('skip') || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean)]);
+
+if (DEBUG) document.body.classList.add('debug');
+const statusEl = document.getElementById('status');
+function setStatus(text) { statusEl.textContent = text; console.log('[tts]', text); }
+
+// ---------- speech queue ----------
+const queue = [];
+let speaking = false;
+
+function cleanText(text) {
+  return text
+    .replace(/https?:\/\/\S+|www\.\S+/gi, 'link')   // don't read out URLs
+    .replace(/(.)\1{4,}/g, '$1$1$1')                // "noooooooo" -> "nooo"
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_LEN);
+}
+
+function say(text) {
+  text = cleanText(text);
+  if (!text) return;
+  queue.push(text);
+  if (queue.length > 15) queue.splice(0, queue.length - 15); // don't fall too far behind a busy chat
+  next();
+}
+
+function next() {
+  if (speaking || !queue.length) return;
+  speaking = true;
+  const text = queue.shift();
+  // Male voice first (needs a key); if it fails or the daily limit is used up, the Google voice takes over.
+  const tries = KEY ? [voiceRssUrl(text), ...googleUrls(text)] : googleUrls(text);
+  tries.reduce((chain, url) => chain.catch(() => playAudio(url, url.includes('voicerss') ? 1 : SPEED)), Promise.reject())
+    .catch(err => { setStatus('Voice failed (' + (err && (err.name || err.message)) + '), using backup voice'); return speakWithBrowser(text); })
+    .finally(() => { speaking = false; next(); });
+}
+
+// VoiceRSS: British male "Harry", free key from voicerss.org (350 messages a day).
+function voiceRssUrl(text) {
+  return 'https://api.voicerss.org/?key=' + encodeURIComponent(KEY) + '&hl=en-gb&v=' + encodeURIComponent(VOICE) +
+    '&c=MP3&f=24khz_16bit_mono&src=' + encodeURIComponent(text);
+}
+
+function googleUrls(text) {
+  const query = '&tl=' + encodeURIComponent(LANG) + '&q=' + encodeURIComponent(text);
+  return [
+    'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob' + query,
+    'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx' + query,
+  ];
+}
+
+// Plays the speech as a normal audio clip, so the app treats it like alert sound.
+function playAudio(url, rate = 1) {
+  return new Promise((resolve, reject) => {
+    const audio = new Audio(url);
+    audio.preservesPitch = true; // faster talking, same voice
+    audio.playbackRate = rate;
+    audio.volume = VOLUME;
+    const timer = setTimeout(() => { audio.pause(); resolve(); }, 30000);
+    audio.onended = () => { clearTimeout(timer); resolve(); };
+    audio.onerror = () => { clearTimeout(timer); reject(new Error('audio failed')); };
+    audio.play().catch(err => { clearTimeout(timer); reject(err); });
+  });
+}
+
+// Backup voice built into the browser, used only if the audio clip can't play.
+function speakWithBrowser(text) {
+  return new Promise(resolve => {
+    if (!('speechSynthesis' in window)) return resolve();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = LANG;
+    u.volume = VOLUME;
+    u.onend = u.onerror = () => resolve();
+    speechSynthesis.speak(u);
+    setTimeout(resolve, 30000);
+  });
+}
+
+// ---------- Twitch chat (read-only, no login needed) ----------
+function connect() {
+  setStatus('Connecting to #' + CHANNEL + '…');
+  const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+
+  ws.onopen = () => {
+    ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 80000));
+    ws.send('JOIN #' + CHANNEL);
+  };
+
+  // A connection can die silently (sleep, network switch). Ping every minute and
+  // reconnect if Twitch hasn't answered anything for two minutes.
+  let lastHeard = Date.now();
+  const keepAlive = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - lastHeard > 120000) { setStatus('Connection went quiet, reconnecting…'); ws.close(); }
+    else ws.send('PING :keepalive');
+  }, 60000);
+
+  ws.onmessage = event => {
+    lastHeard = Date.now();
+    for (const line of event.data.split('\r\n')) {
+      if (!line) continue;
+      if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); continue; }
+      if (line.includes(' JOIN #' + CHANNEL)) setStatus('Connected to #' + CHANNEL + ' — waiting for chat');
+      const room = line.match(/room-id=(\d+)[^ ]* :tmi\.twitch\.tv ROOMSTATE/);
+      if (room) loadChannelEmotes(room[1]);
+      const msg = parsePrivmsg(line);
+      if (msg) handleChat(msg);
+    }
+  };
+
+  ws.onclose = () => { clearInterval(keepAlive); setStatus('Disconnected, reconnecting…'); setTimeout(connect, 3000); };
+  ws.onerror = () => ws.close();
+}
+
+function parsePrivmsg(line) {
+  const match = line.match(/^(?:@(\S+) )?:(\w+)!\S+ PRIVMSG #\S+ :(.*)$/);
+  if (!match) return null;
+  const tags = {};
+  (match[1] || '').split(';').forEach(pair => { const [k, v] = pair.split('='); tags[k] = v; });
+  return { user: match[2].toLowerCase(), name: tags['display-name'] || match[2], text: match[3], emotes: tags.emotes };
+}
+
+// ---------- emotes: never read them out ----------
+// Twitch emotes come marked inside each message. 7TV / BTTV / FFZ emotes are just words,
+// so we download their names once and skip any word that matches.
+const extraEmotes = new Set();
+let loadedRoom = null;
+
+function addEmoteNames(url, pick) {
+  return fetch(url).then(r => r.ok ? r.json() : null)
+    .then(data => { if (data) pick(data).forEach(name => name && extraEmotes.add(name)); })
+    .catch(() => {});
+}
+
+function loadChannelEmotes(roomId) {
+  if (loadedRoom === roomId) return;
+  loadedRoom = roomId;
+  const codes = list => (list || []).map(e => e.code);
+  const names = set => ((set && set.emotes) || []).map(e => e.name);
+  Promise.all([
+    addEmoteNames('https://api.betterttv.net/3/cached/emotes/global', codes),
+    addEmoteNames('https://api.betterttv.net/3/cached/users/twitch/' + roomId, d => [...codes(d.channelEmotes), ...codes(d.sharedEmotes)]),
+    addEmoteNames('https://api.betterttv.net/3/cached/frankerfacez/emotes/global', codes),
+    addEmoteNames('https://api.betterttv.net/3/cached/frankerfacez/users/twitch/' + roomId, codes),
+    addEmoteNames('https://7tv.io/v3/emote-sets/global', names),
+    addEmoteNames('https://7tv.io/v3/users/twitch/' + roomId, d => names(d.emote_set)),
+  ]).then(() => console.log('[tts] loaded', extraEmotes.size, '7TV/BTTV/FFZ emotes'));
+}
+
+// Twitch's tag looks like "25:0-4,12-16/1902:6-10" (emote id : character positions).
+function removeEmotes(text, emotesTag) {
+  if (emotesTag) {
+    const chars = Array.from(text);
+    emotesTag.split('/').forEach(emote => {
+      (emote.split(':')[1] || '').split(',').forEach(range => {
+        const [from, to] = range.split('-').map(Number);
+        for (let i = from; i <= to; i++) chars[i] = '';
+      });
+    });
+    text = chars.join('');
+  }
+  return text.split(/\s+/).filter(word => word && !extraEmotes.has(word)).join(' ');
+}
+
+function handleChat({ user, name, text, emotes }) {
+  if (IGNORED.has(user)) return;
+  if (text.startsWith('!')) return;                       // bot commands
+  if (text.startsWith('\u0001ACTION ')) text = text.slice(8, -1); // "/me" messages
+  text = removeEmotes(text, emotes);
+  if (!text) return;                                      // message was only emotes
+  if (DEBUG) setStatus(name + ': ' + text);
+  // Display names with only letters read nicely; odd ones (numbers, underscores) get tidied.
+  const spokenName = name.replace(/[_\d]+/g, ' ').trim() || name;
+  say(SAY_NAMES ? spokenName + ' says: ' + text : text);
+}
+
+connect();
+if (params.get('test') === '1') {
+  say('Text to speech is working. Chat messages will be read out loud.');
+  // Normal browsers block sound until you tap the page once; the stream app does not.
+  document.addEventListener('click', () => say('Sound is on.'), { once: true });
+}
+</script>
+</body>
+</html>
