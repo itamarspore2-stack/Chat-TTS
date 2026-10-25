@@ -71,15 +71,18 @@ function say(text) {
   next();
 }
 
+let turn = 0; // bumped to abandon a message that got frozen mid-way
+
 function next() {
   if (speaking || !queue.length) return;
   speaking = true;
+  const myTurn = ++turn;
   const text = queue.shift();
   // Male voice first (needs a key); if it fails or the daily limit is used up, the Google voice takes over.
   const tries = KEY ? [voiceRssUrl(text), ...googleUrls(text)] : googleUrls(text);
   tries.reduce((chain, url) => chain.catch(() => playAudio(url, url.includes('voicerss') ? 1 : SPEED)), Promise.reject())
     .catch(err => { setStatus('Voice failed (' + (err && (err.name || err.message)) + '), using backup voice'); return speakWithBrowser(text); })
-    .finally(() => { speaking = false; next(); });
+    .finally(() => { if (myTurn !== turn) return; speaking = false; next(); });
 }
 
 // VoiceRSS: British male "Harry", free key from voicerss.org (350 messages a day).
@@ -183,6 +186,28 @@ window.addEventListener('online', networkChanged);
 if (navigator.connection && navigator.connection.addEventListener) {
   navigator.connection.addEventListener('change', networkChanged);
 }
+
+// When the app goes to the background or the screen locks, the phone freezes the page and
+// the connection usually dies. Coming back, start a fresh one straight away and clear any
+// half-played message that was frozen mid-way.
+let hiddenSince = 0;
+function cameBack() {
+  if (!hiddenSince) return;
+  const away = Date.now() - hiddenSince;
+  hiddenSince = 0;
+  if (away < 5000) return;
+  turn++;
+  speaking = false;
+  next();
+  networkChanged();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) hiddenSince = hiddenSince || Date.now();
+  else cameBack();
+});
+document.addEventListener('freeze', () => { hiddenSince = hiddenSince || Date.now(); });
+document.addEventListener('resume', cameBack);
+window.addEventListener('pageshow', cameBack);
 
 function parsePrivmsg(line) {
   const match = line.match(/^(?:@(\S+) )?:(\w+)!\S+ PRIVMSG #\S+ :(.*)$/);
