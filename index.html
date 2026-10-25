@@ -78,7 +78,7 @@ function next() {
   // Male voice first (needs a key); if it fails or the daily limit is used up, the Google voice takes over.
   const tries = KEY ? [voiceRssUrl(text), ...googleUrls(text)] : googleUrls(text);
   tries.reduce((chain, url) => chain.catch(() => playAudio(url, url.includes('voicerss') ? 1 : SPEED)), Promise.reject())
-    .catch(() => speakWithBrowser(text))
+    .catch(err => { setStatus('Voice failed (' + (err && (err.name || err.message)) + '), using backup voice'); return speakWithBrowser(text); })
     .finally(() => { speaking = false; next(); });
 }
 
@@ -135,7 +135,17 @@ function connect() {
     ws.send('JOIN #' + CHANNEL);
   };
 
+  // A connection can die silently (sleep, network switch). Ping every minute and
+  // reconnect if Twitch hasn't answered anything for two minutes.
+  let lastHeard = Date.now();
+  const keepAlive = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - lastHeard > 120000) { setStatus('Connection went quiet, reconnecting…'); ws.close(); }
+    else ws.send('PING :keepalive');
+  }, 60000);
+
   ws.onmessage = event => {
+    lastHeard = Date.now();
     for (const line of event.data.split('\r\n')) {
       if (!line) continue;
       if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); continue; }
@@ -147,7 +157,7 @@ function connect() {
     }
   };
 
-  ws.onclose = () => { setStatus('Disconnected, reconnecting…'); setTimeout(connect, 3000); };
+  ws.onclose = () => { clearInterval(keepAlive); setStatus('Disconnected, reconnecting…'); setTimeout(connect, 3000); };
   ws.onerror = () => ws.close();
 }
 
