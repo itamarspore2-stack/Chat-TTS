@@ -124,9 +124,26 @@ function speakWithBrowser(text) {
 }
 
 // ---------- Twitch chat (read-only, no login needed) ----------
+let currentSocket = null;
+
 function connect() {
   setStatus('Connecting to #' + CHANNEL + '…');
   const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+  currentSocket = ws;
+  let done = false;
+
+  // A dead connection (Wi-Fi -> mobile data, tunnel, sleep) can take minutes to report
+  // itself closed, so we never wait for it: drop it and open a fresh one right away.
+  function reconnect(reason) {
+    if (done) return;
+    done = true;
+    clearInterval(keepAlive);
+    setStatus(reason + ', reconnecting…');
+    ws.onclose = ws.onerror = ws.onmessage = null;
+    try { ws.close(); } catch (e) {}
+    setTimeout(connect, 2000);
+  }
+  ws.reconnect = reconnect;
 
   ws.onopen = () => {
     ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
@@ -135,14 +152,12 @@ function connect() {
     ws.send('JOIN #' + CHANNEL);
   };
 
-  // A connection can die silently (sleep, network switch). Ping every minute and
-  // reconnect if Twitch hasn't answered anything for two minutes.
+  // Ping every 30 seconds; if Twitch hasn't answered anything for 70 seconds, start over.
   let lastHeard = Date.now();
   const keepAlive = setInterval(() => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    if (Date.now() - lastHeard > 120000) { setStatus('Connection went quiet, reconnecting…'); ws.close(); }
-    else ws.send('PING :keepalive');
-  }, 60000);
+    if (Date.now() - lastHeard > 70000) return reconnect('Connection went quiet');
+    if (ws.readyState === WebSocket.OPEN) ws.send('PING :keepalive');
+  }, 30000);
 
   ws.onmessage = event => {
     lastHeard = Date.now();
@@ -157,8 +172,16 @@ function connect() {
     }
   };
 
-  ws.onclose = () => { clearInterval(keepAlive); setStatus('Disconnected, reconnecting…'); setTimeout(connect, 3000); };
-  ws.onerror = () => ws.close();
+  ws.onclose = () => reconnect('Disconnected');
+  ws.onerror = () => reconnect('Connection error');
+}
+
+// The phone switched networks (Wi-Fi <-> mobile data) or came back online: the old
+// connection is almost certainly dead, so don't wait for the ping to find out.
+function networkChanged() { if (currentSocket) currentSocket.reconnect('Network changed'); }
+window.addEventListener('online', networkChanged);
+if (navigator.connection && navigator.connection.addEventListener) {
+  navigator.connection.addEventListener('change', networkChanged);
 }
 
 function parsePrivmsg(line) {
