@@ -248,6 +248,15 @@ document.addEventListener('freeze', () => { hiddenSince = hiddenSince || Date.no
 document.addEventListener('resume', cameBack);
 window.addEventListener('pageshow', cameBack);
 
+// Inside the stream app the page often gets no "you're back" event at all. A frozen page
+// can't run its timers, so a tick that arrives late means the phone paused us: start over.
+let lastTick = Date.now();
+setInterval(() => {
+  const gap = Date.now() - lastTick;
+  lastTick = Date.now();
+  if (gap > 3000) { setStatus('Was paused ' + Math.round(gap / 1000) + 's, restarting…'); location.reload(); }
+}, 1000);
+
 function parsePrivmsg(line) {
   const match = line.match(/^(?:@(\S+) )?:(\w+)!\S+ PRIVMSG #\S+ :(.*)$/);
   if (!match) return null;
