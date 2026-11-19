@@ -94,8 +94,8 @@ function voiceRssUrl(text) {
 function googleUrls(text) {
   const query = '&tl=' + encodeURIComponent(LANG) + '&q=' + encodeURIComponent(text);
   return [
-    'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob' + query,
     'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx' + query,
+    'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob' + query,
   ];
 }
 
@@ -107,9 +107,13 @@ function playAudio(url, rate = 1) {
     audio.playbackRate = rate;
     audio.volume = VOLUME;
     const timer = setTimeout(() => { audio.pause(); resolve(); }, 30000);
-    audio.onended = () => { clearTimeout(timer); resolve(); };
-    audio.onerror = () => { clearTimeout(timer); reject(new Error('audio failed')); };
-    audio.play().catch(err => { clearTimeout(timer); reject(err); });
+    // A voice that never starts (blocked or hanging request) moves on to the next voice
+    // instead of silently eating the message.
+    const startTimer = setTimeout(() => { clearTimeout(timer); audio.pause(); reject(new Error('voice did not start')); }, 7000);
+    audio.onplaying = () => clearTimeout(startTimer);
+    audio.onended = () => { clearTimeout(timer); clearTimeout(startTimer); resolve(); };
+    audio.onerror = () => { clearTimeout(timer); clearTimeout(startTimer); reject(new Error('audio failed')); };
+    audio.play().catch(err => { clearTimeout(timer); clearTimeout(startTimer); reject(err); });
   });
 }
 
