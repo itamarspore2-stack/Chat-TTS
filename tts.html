@@ -235,10 +235,11 @@ function cameBack() {
   if (!hiddenSince) return;
   const away = Date.now() - hiddenSince;
   hiddenSince = 0;
-  if (away < 1000) return;
-  // Reopening the app is what reliably fixes it, so do the same: start the page over.
-  setStatus('Back after ' + Math.round(away / 1000) + 's, restarting…');
-  location.reload();
+  if (away < 5000) return;
+  turn++;
+  speaking = false;
+  next();
+  networkChanged();
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) hiddenSince = hiddenSince || Date.now();
@@ -247,15 +248,6 @@ document.addEventListener('visibilitychange', () => {
 document.addEventListener('freeze', () => { hiddenSince = hiddenSince || Date.now(); });
 document.addEventListener('resume', cameBack);
 window.addEventListener('pageshow', cameBack);
-
-// Inside the stream app the page often gets no "you're back" event at all. A frozen page
-// can't run its timers, so a tick that arrives late means the phone paused us: start over.
-let lastTick = Date.now();
-setInterval(() => {
-  const gap = Date.now() - lastTick;
-  lastTick = Date.now();
-  if (gap > 3000) { setStatus('Was paused ' + Math.round(gap / 1000) + 's, restarting…'); location.reload(); }
-}, 1000);
 
 function parsePrivmsg(line) {
   const match = line.match(/^(?:@(\S+) )?:(\w+)!\S+ PRIVMSG #\S+ :(.*)$/);
