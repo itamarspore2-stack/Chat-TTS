@@ -102,8 +102,14 @@ function voices(text) {
 function speakText(text) {
   const all = voices(text);
   const awake = all.filter(v => !(resting[v.name] > Date.now()));
-  return (awake.length ? awake : all).reduce((chain, v) => chain.catch(() =>
+  return (awake.length ? awake : all).reduce((chain, v) => chain.catch(err => (err && err.blocked) ? Promise.reject(err) :
     playAudio(v.url, v.rate).catch(err => {
+      // The browser blocking sound is not the voice's fault: don't rest it, and don't try the others.
+      if (err && err.name === 'NotAllowedError') {
+        setStatus('Sound is blocked by the browser - tap the page once');
+        err.blocked = true;
+        throw err;
+      }
       resting[v.name] = Date.now() + 120000;
       setStatus(v.name + ' voice failed, trying the next one');
       throw err;
