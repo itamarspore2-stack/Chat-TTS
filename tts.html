@@ -235,11 +235,10 @@ function cameBack() {
   if (!hiddenSince) return;
   const away = Date.now() - hiddenSince;
   hiddenSince = 0;
-  if (away < 5000) return;
-  turn++;
-  speaking = false;
-  next();
-  networkChanged();
+  if (away < 1000) return;
+  // Reopening the app is what reliably fixes it, so do the same: start the page over.
+  setStatus('Back after ' + Math.round(away / 1000) + 's, restarting…');
+  location.reload();
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) hiddenSince = hiddenSince || Date.now();
